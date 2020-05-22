@@ -18,6 +18,14 @@ module CartoDB
       include CartoDB::DataMover::LegacyFunctions
       attr_reader :logger
 
+      attr_accessor(
+        :workdir,
+        :org_dump_name,
+        :org_dump_path,
+        :user_dump_name,
+        :user_dump_path
+      )
+
       def initialize(options)
         default_options = { data: true, metadata: true, set_banner: true, update_metadata: true }
         @options = default_options.merge(options)
@@ -35,13 +43,13 @@ module CartoDB
         # User(s) metadata json
         @pack_config = JSON::parse File.read(@options[:file])
 
-        @path = File.expand_path(File.dirname(@options[:file])) + "/"
+        @workdir = File.expand_path(File.dirname(@options[:file])) + "/"
 
         job_uuid = @options[:job_uuid] || Carto::UUIDHelper.random_uuid
         @import_log = { job_uuid:     job_uuid,
                         id:           nil,
                         type:         'import',
-                        path:         @path,
+                        path:         workdir,
                         start:        @start,
                         end:          nil,
                         elapsed_time: nil,
@@ -105,6 +113,9 @@ module CartoDB
       def process_user
         @target_username = @pack_config['user']['username']
         @target_userid = @pack_config['user']['id']
+        @user_dump_name = "user_#{@target_userid}.dump"
+        @user_dump_path = "#{workdir}#{user_dump_name}"
+
         @import_log[:id] = @pack_config['user']['username']
         @target_port = ENV['USER_DB_PORT'] || @config[:dbport]
 
@@ -117,6 +128,8 @@ module CartoDB
           @target_dbuser = database_username(@target_userid)
           @target_schema = @pack_config['user']['database_schema']
           @target_org_id = organization_data['id']
+          @org_dump_name = "org_#{@target_org_id}.dump"
+          @org_dump_path = "#{workdir}#{org_dump_name}"
 
           if owner?(organization_data)
             # If the user being imported into an org is the owner of the org, we make the import as it were a single-user
@@ -190,21 +203,21 @@ module CartoDB
             roles.each { |role| grant_user_role(user, role) }
           end
           begin
-            if @target_org_id && @target_is_owner && File.exists?(org_dump_path = "#{@path}org_#{@target_org_id}.dump")
+            if @target_org_id && @target_is_owner && File.exists?(org_dump_path)
               create_db(org_dump_path)
               create_org_oauth_app_user_roles(@target_org_id)
               create_org_api_key_roles(@target_org_id)
-              import_pgdump("org_#{@target_org_id}.dump")
+              import_pgdump(org_dump_name)
               grant_org_oauth_app_user_roles(@target_org_id)
               grant_org_api_key_roles(@target_org_id)
-            elsif File.exists?(user_dump_path = "#{@path}user_#{@target_userid}.dump")
+            elsif File.exists?(user_dump_path)
               create_db(user_dump_path)
               create_user_oauth_app_user_roles(@target_userid)
               create_user_api_key_roles(@target_userid)
-              import_pgdump("user_#{@target_userid}.dump")
+              import_pgdump(user_dump_name)
               grant_user_oauth_app_user_roles(@target_userid)
               grant_user_api_key_roles(@target_userid)
-            elsif File.exists? "#{@path}#{@target_username}.schema.sql"
+            elsif File.exists? "#{workdir}#{@target_username}.schema.sql"
               create_db
               run_file_restore_schema("#{@target_username}.schema.sql")
             end
@@ -262,7 +275,7 @@ module CartoDB
 
         org_user_ids.each do |user|
           @logger.info("Importing org user #{user}..")
-          i = ImportJob.new(file: @path + "user_#{user}.json",
+          i = ImportJob.new(file: workdir + "user_#{user}.json",
                             mode: @options[:mode],
                             host: @target_dbhost,
                             target_org: @pack_config['organization']['name'],
@@ -286,7 +299,7 @@ module CartoDB
         db = @pack_config['users'][0]['database_name']
         @pack_config['users'].each do |user|
           @logger.info("Rolling back metadata for org user #{user['id']}..")
-          ImportJob.new(file: @path + "user_#{user['id']}.json",
+          ImportJob.new(file: workdir + "user_#{user['id']}.json",
                         mode: :rollback,
                         host: @target_dbhost,
                         target_org: @pack_config['organization']['name'],
@@ -395,15 +408,15 @@ module CartoDB
       end
 
       def run_file_redis(file)
-        run_command("cat #{@path}#{file} | #{run_redis_command(@config)}")
+        run_command("cat #{workdir}#{file} | #{run_redis_command(@config)}")
       end
 
       def run_file_metadata_postgres(file)
-        run_command("cat #{@path}#{file} | psql -v ON_ERROR_STOP=1 #{conn_string(@config[:dbuser], @config[:dbhost], @config[:dbport], @config[:dbname])}")
+        run_command("cat #{workdir}#{file} | psql -v ON_ERROR_STOP=1 #{conn_string(@config[:dbuser], @config[:dbhost], @config[:dbport], @config[:dbname])}")
       end
 
       def run_file_restore_postgres(file, sections = nil)
-        file_path = "#{@path}#{file}"
+        file_path = "#{workdir}#{file}"
         command = "#{pg_restore_bin_path(file_path)} -e --verbose -j4 --disable-triggers -Fc #{file_path} #{conn_string(
           @config[:dbuser],
           @target_dbhost,
@@ -415,7 +428,7 @@ module CartoDB
       end
 
       def run_file_restore_schema(file)
-        run_command("cat #{@path}#{file} | psql -v ON_ERROR_STOP=1 #{conn_string(
+        run_command("cat #{workdir}#{file} | psql -v ON_ERROR_STOP=1 #{conn_string(
           @config[:dbuser],
           @target_dbhost,
           @config[:user_dbport],
@@ -455,7 +468,7 @@ module CartoDB
       end
 
       def toc_file(file)
-        toc_file = "#{@path}user_#{@target_username}.list"
+        toc_file = "#{workdir}user_#{@target_username}.list"
         command = "#{pg_restore_bin_path(file)} -l #{file} --file='#{toc_file}'"
         run_command(command)
         clean_toc_file(toc_file)
@@ -468,7 +481,7 @@ module CartoDB
       # Disabling it may be hard. Maybe it's easier to just exclude it in the export.
       def import_pgdump(dump)
         @logger.info("Importing dump from #{dump} using pg_restore..")
-        @toc_file = toc_file("#{@path}#{dump}")
+        @toc_file = toc_file("#{workdir}#{dump}")
 
         run_file_restore_postgres(dump, 'pre-data')
         run_file_restore_postgres(dump, 'data')
