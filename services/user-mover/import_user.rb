@@ -20,10 +20,8 @@ module CartoDB
 
       attr_accessor(
         :workdir,
-        :org_dump_name,
-        :org_dump_path,
-        :user_dump_name,
-        :user_dump_path
+        :dump_name,
+        :dump_path
       )
 
       def initialize(options)
@@ -113,8 +111,8 @@ module CartoDB
       def process_user
         @target_username = @pack_config['user']['username']
         @target_userid = @pack_config['user']['id']
-        @user_dump_name = "user_#{@target_userid}.dump"
-        @user_dump_path = "#{workdir}#{user_dump_name}"
+        @dump_name = "user_#{@target_userid}.dump"
+        @dump_path = "#{workdir}#{dump_name}"
 
         @import_log[:id] = @pack_config['user']['username']
         @target_port = ENV['USER_DB_PORT'] || @config[:dbport]
@@ -128,8 +126,8 @@ module CartoDB
           @target_dbuser = database_username(@target_userid)
           @target_schema = @pack_config['user']['database_schema']
           @target_org_id = organization_data['id']
-          @org_dump_name = "org_#{@target_org_id}.dump"
-          @org_dump_path = "#{workdir}#{org_dump_name}"
+          @dump_name = "org_#{@target_org_id}.dump"
+          @dump_path = "#{workdir}#{dump_name}"
 
           if owner?(organization_data)
             # If the user being imported into an org is the owner of the org, we make the import as it were a single-user
@@ -203,18 +201,18 @@ module CartoDB
             roles.each { |role| grant_user_role(user, role) }
           end
           begin
-            if @target_org_id && @target_is_owner && File.exists?(org_dump_path)
-              create_db(org_dump_path)
+            if @target_org_id && @target_is_owner && File.exists?(dump_path)
+              create_db(dump_path)
               create_org_oauth_app_user_roles(@target_org_id)
               create_org_api_key_roles(@target_org_id)
-              import_pgdump(org_dump_name)
+              import_pgdump(dump_name)
               grant_org_oauth_app_user_roles(@target_org_id)
               grant_org_api_key_roles(@target_org_id)
-            elsif File.exists?(user_dump_path)
-              create_db(user_dump_path)
+            elsif File.exists?(dump_path)
+              create_db(dump_path)
               create_user_oauth_app_user_roles(@target_userid)
               create_user_api_key_roles(@target_userid)
-              import_pgdump(user_dump_name)
+              import_pgdump(dump_name)
               grant_user_oauth_app_user_roles(@target_userid)
               grant_user_api_key_roles(@target_userid)
             elsif File.exists? "#{workdir}#{@target_username}.schema.sql"
